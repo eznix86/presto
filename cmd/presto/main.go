@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -266,6 +267,19 @@ func trustMode() trust.Mode {
 	return trust.ModeAsk
 }
 
+// downloadWorkers is tuned for latency, not bandwidth: every archive costs a
+// redirect plus a fetch, so the wall clock is the number of waves, not the bytes.
+func downloadWorkers() int {
+	const defaultWorkers = 24
+
+	n, err := strconv.Atoi(os.Getenv("PRESTO_DOWNLOAD_WORKERS"))
+	if err != nil || n < 1 {
+		return defaultWorkers
+	}
+
+	return n
+}
+
 func truthy(value string) bool {
 	switch strings.ToLower(value) {
 	case "1", "true", "yes":
@@ -326,7 +340,7 @@ func runInstall(forceResolve bool) error {
 
 	spin := ui.StartSpinner("Downloading packages")
 
-	dl := downloader.NewDownloader(8)
+	dl := downloader.NewDownloader(downloadWorkers())
 	installed, err := dl.DownloadAll(packages, func(done, total int, name string) {
 		spin.Detail(fmt.Sprintf("%d/%d %s", done, total, name))
 	})

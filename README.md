@@ -145,16 +145,22 @@ deleted before each run. Both tools keep a warm package cache.
 | Tool | Time |
 |------|------|
 | Composer 2.10 | 4.62s |
-| **Presto** | **1.27s** |
+| **Presto** | **0.48s** |
 
-With a cold cache, so every manifest and archive is fetched: **12.6s**.
+With a cold cache, so every manifest and archive is fetched: **5.3s**.
 
-The install is three phases and each one is parallel:
+Before this work the same project took 21.5s, because the resolver fetched one
+manifest at a time and nothing was cached between runs. What changed:
 
 - manifests are fetched breadth-first across 16 connections, not one at a time
 - manifests are cached on disk and revalidated with `ETag`, so a repeat install
   sends no bytes
 - archives are cached too, so wiping `vendor/` costs no network at all
+- downloads run 24 at a time because each archive costs a redirect plus a fetch,
+  while extraction is capped at 8 because writing thousands of small files is
+  disk-bound and slows down when oversubscribed
+
+Set `PRESTO_DOWNLOAD_WORKERS` to change the download count.
 
 ## 🎨 Example Output
 

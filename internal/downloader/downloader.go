@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -17,19 +18,35 @@ import (
 	"github.com/aras/presto/internal/resolver"
 )
 
+// maxExtractors caps concurrent extraction. Downloading is latency-bound and
+// wants many workers; writing thousands of small files is disk-bound and slows
+// down when oversubscribed, so the two are limited separately.
+const maxExtractors = 8
+
 // Downloader handles parallel package downloads
 type Downloader struct {
 	workers    int
 	httpClient *http.Client
 	vendorDir  string
+	extracting chan struct{}
 }
 
 // NewDownloader creates a new downloader with specified number of workers
 func NewDownloader(workers int) *Downloader {
+	extractors := runtime.NumCPU()
+	if extractors > maxExtractors {
+		extractors = maxExtractors
+	}
+
+	if extractors < 1 {
+		extractors = 1
+	}
+
 	return &Downloader{
 		workers:    workers,
 		httpClient: httpx.New(5*time.Minute, workers),
 		vendorDir:  "vendor",
+		extracting: make(chan struct{}, extractors),
 	}
 }
 
@@ -126,7 +143,7 @@ func (d *Downloader) downloadPackage(pkg *resolver.Package) (bool, error) {
 		}
 	}
 
-	if err := d.extractZip(archive, packageDir); err != nil {
+	if err := d.extract(archive, packageDir); err != nil {
 		_ = os.Remove(archive)
 		_ = os.RemoveAll(packageDir)
 
@@ -171,6 +188,13 @@ func (d *Downloader) fetch(url, dest string) error {
 	}
 
 	return os.Rename(tmpFile.Name(), dest)
+}
+
+func (d *Downloader) extract(archive, dest string) error {
+	d.extracting <- struct{}{}
+	defer func() { <-d.extracting }()
+
+	return d.extractZip(archive, dest)
 }
 
 // extractZip extracts a zip archive to the destination directory

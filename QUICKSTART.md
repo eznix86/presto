@@ -199,8 +199,8 @@ Development
 
 | Run | Composer 2.10 | Presto |
 |-----|---------------|--------|
-| Warm cache | 4.62s | **1.27s** |
-| Cold cache | | 12.6s |
+| Warm cache | 4.62s | **0.48s** |
+| Cold cache | | 5.3s |
 
 Presto caches manifests and archives in `~/.cache/presto`, shared across projects.
 Run `presto cache clear` to drop it.
