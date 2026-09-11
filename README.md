@@ -2,7 +2,7 @@
 
 **Lightning-Fast PHP Package Manager - A Composer Drop-in Replacement**
 
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![Version](https://img.shields.io/badge/version-v0.1.11-blue.svg)](https://github.com/paramientos/presto/releases)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/paramientos/presto/actions)
@@ -86,6 +86,8 @@ make build
 ### Global Options
 
 - `-v, --verbose`: Enable verbose output for debugging
+- `--trust-scripts`: Run the project's scripts without asking
+- `--no-scripts`: Never run the project's scripts
 - `-h, --help`: Show help
 
 ### Commands
@@ -128,6 +130,9 @@ presto validate --strict
 # Run custom scripts (v0.1.10+)
 presto run post-install-cmd
 
+# Allow this project's scripts to run
+presto trust
+
 # Clear cache
 presto cache clear
 ```
@@ -149,46 +154,89 @@ Real-world benchmark (Laravel-sized project with 47 packages):
 
 ## 🎨 Example Output
 
+A spinner runs while presto works, then each phase collapses to one line.
+
 ```bash
 $ presto install
-🎵 Presto Install
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📦 Project: myapp/project
-📝 Description: My awesome PHP project
-
-🔍 Resolving dependencies...
-✅ Resolved 47 packages
-
-⬇️  Downloading packages...
-[========================================] 47/47
-
-📝 Generating autoload files...
-
-✨ Installation complete!
+Resolved 47 packages in 1.24s
+Installed 47 packages in 3.51s
+ + doctrine/inflector 2.0.8
+ + laravel/framework v10.34.2
+ + symfony/console v6.4.2
 ```
+
+Nothing to fetch reads as an audit:
+
+```bash
+$ presto install
+Resolved 47 packages in 12ms
+Audited 47 packages in 38ms
+```
+
+Progress goes to stderr, so `presto show > deps.txt` captures data and nothing else.
 
 ```bash
 $ presto audit
-🎵 Security Audit
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️  Found 2 vulnerabilities:
+warning: found 2 vulnerabilities
 
-[HIGH] symfony/http-kernel@5.4.0
-  CVE: CVE-2023-XXXXX
-  Description: Security vulnerability in HTTP kernel
-  Fix: Update to 5.4.31 or later
+HIGH symfony/http-kernel 5.4.0
+  CVE-2023-XXXXX
+  Security vulnerability in HTTP kernel
+  fix: Update to 5.4.31 or later
 ```
 
 ```bash
 $ presto tree
-📦 laravel/laravel
-├── php ^8.1
-├── laravel/framework ^10.0 (v10.34.2)
-│   ├── illuminate/support ^10.0 (v10.34.2)
-│   │   ├── doctrine/inflector ^2.0 (v2.0.8)
-│   │   └── ...
-└── ...
+laravel/laravel
+├── laravel/framework v10.34.2
+│   └── illuminate/support v10.34.2
+│       └── doctrine/inflector v2.0.8
+└── symfony/console v6.4.2
 ```
+
+## 🔐 Script Trust
+
+`composer.json` can ask for any command to run on your machine. Cloning a repository
+and installing it should not be enough to run those commands, so presto asks first.
+
+```bash
+$ presto install
+warning: this project defines scripts that presto would run
+
+  post-install-cmd
+    @php artisan package:discover --ansi
+
+? Run these scripts?
+> [o] once    run them for this install only
+  [a] always  trust this project from now on
+  [n] never   skip them
+```
+
+Answering `always` records the project in `~/.config/presto/trust.json`, keyed by the
+commands themselves. Edit a script and presto asks again.
+
+Without a terminal to ask, the scripts are skipped and named at the end:
+
+```bash
+$ presto install
+Resolved 47 packages in 1.24s
+Audited 47 packages in 38ms
+
+warning: 1 script was not run: this project is not trusted
+  post-install-cmd
+  run `presto trust` to allow them
+```
+
+| | |
+|---|---|
+| `presto trust` | trust the current project |
+| `presto trust list` | list trusted projects |
+| `presto trust revoke [path]` | withdraw trust |
+| `--trust-scripts` | run them without asking |
+| `--no-scripts` | never run them |
+| `PRESTO_TRUST_SCRIPTS=1` | same as `--trust-scripts`, for CI |
+
+`presto run <script>` is never gated. You typed the name, so you meant it.
 
 ## 🔥 Killer Features
 
@@ -204,8 +252,8 @@ Parallel downloads and native binary make it incredibly fast
 ### 4. **Smart Caching**
 Shared cache across projects saves disk space and time
 
-### 5. **Better UX**
-Clear progress indicators, beautiful output, helpful error messages
+### 5. **Script Trust**
+A project's scripts run only once you have seen them and said yes
 
 ## 🏗️ Architecture
 
@@ -218,7 +266,11 @@ presto/
 │   ├── resolver/        # Dependency resolver
 │   ├── downloader/      # Parallel downloader
 │   ├── autoload/        # Autoload generator
-│   └── security/        # Security auditor
+│   ├── lockfile/        # composer.lock writer
+│   ├── scripts/         # Composer script runner
+│   ├── security/        # Security auditor
+│   ├── trust/           # Script trust store
+│   └── ui/              # Terminal output
 └── go.mod
 ```
 

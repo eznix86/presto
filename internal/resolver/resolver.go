@@ -11,9 +11,11 @@ import (
 )
 
 type Resolver struct {
-	client   *packagist.Client
-	resolved map[string]string
-	visited  map[string]bool
+	client    *packagist.Client
+	resolved  map[string]string
+	visited   map[string]bool
+	onPackage func(name string)
+	log       func(format string, args ...interface{})
 }
 
 type Package struct {
@@ -30,6 +32,22 @@ func NewResolver(client *packagist.Client) *Resolver {
 		client:   client,
 		resolved: make(map[string]string),
 		visited:  make(map[string]bool),
+	}
+}
+
+// OnPackage reports each package as resolution reaches it.
+func (r *Resolver) OnPackage(fn func(name string)) {
+	r.onPackage = fn
+}
+
+// Log receives the backtracking detail that is too noisy for normal output.
+func (r *Resolver) Log(fn func(format string, args ...interface{})) {
+	r.log = fn
+}
+
+func (r *Resolver) logf(format string, args ...interface{}) {
+	if r.log != nil {
+		r.log(format, args...)
 	}
 }
 
@@ -101,7 +119,7 @@ func (r *Resolver) resolveDependency(name, constraint string, isDev bool, packag
 				v, err := semver.NewVersion(r.normalizeVersion(resolvedVersion))
 				if err == nil {
 					if !c.Check(v) {
-						fmt.Printf("⚠️  CONFLICT FIX: Package %s v%s does not satisfy '%s'. Re-resolving with new constraint...\n", name, resolvedVersion, constraint)
+						r.logf("conflict: %s v%s does not satisfy %q, re-resolving", name, resolvedVersion, constraint)
 
 						for i, pkg := range *packages {
 							if pkg.Name == name {
@@ -125,6 +143,10 @@ func (r *Resolver) resolveDependency(name, constraint string, isDev bool, packag
 		return nil
 	}
 	r.visited[name] = true
+
+	if r.onPackage != nil {
+		r.onPackage(name)
+	}
 
 	info, err := r.client.GetPackage(name)
 	if err != nil {
