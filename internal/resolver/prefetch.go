@@ -73,7 +73,7 @@ func (r *Resolver) fetchLevel(level map[string]string) map[string]string {
 					r.onPackage(j.name)
 				}
 
-				version, err := r.findMatchingVersion(info, j.constraint)
+				version, err := r.bestVersion(info, []requirement{{by: "prefetch", constraint: j.constraint}})
 				if err != nil {
 					continue
 				}

@@ -3,11 +3,11 @@ module github.com/aras/presto
 go 1.25
 
 require (
-	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/term v0.2.2
+	github.com/shyim/go-version v0.0.0-20260726121354-c0841a28db20
 	github.com/spf13/cobra v1.8.0
 )
 

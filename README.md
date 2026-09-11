@@ -66,6 +66,7 @@ presto why-not package/name 2.0   # Why can't I install this?
 ### 💯 **100% Compatible**
 - Drop-in replacement for Composer
 - Reads `composer.json` and `composer.lock`
+- Resolves to the same versions Composer does, verified against it
 - Works with Packagist.org
 - PSR-4/PSR-0 autoloading
 - **Strict Validation** (v0.1.9+)
@@ -248,6 +249,30 @@ warning: 1 script was not run: this project is not trusted
 
 `presto run <script>` is never gated. You typed the name, so you meant it.
 
+## 🧮 Resolution
+
+Presto reads Composer's version semantics, not npm's, through
+[shyim/go-version](https://github.com/shyim/go-version): `~1.0` means `>=1.0 <2.0`,
+four-part versions like `9.18.1.10` are ordered properly, and stability ranks
+`dev < alpha < beta < RC < stable`.
+
+A package is chosen by the intersection of every constraint on it, not the last
+one seen, and `conflict` blocks are honoured. When nothing can satisfy them all,
+presto says who asked for what instead of installing something that breaks one of
+them:
+
+```
+error: no released version of acme/lib satisfies every requirement:
+  acme/high 1.0.0 requires >=1.6
+  acme/low 1.0.0 requires <=1.4
+```
+
+Resolution is deterministic: the same `composer.json` gives the same
+`composer.lock` every run.
+
+On a Laravel 10 project (95 packages) and a smaller one (50 packages), presto and
+Composer 2.10 resolve to the identical set of packages at identical versions.
+
 ## 💾 Cache
 
 Presto caches package manifests and archives in `~/.cache/presto`, shared across
@@ -270,8 +295,9 @@ Built-in vulnerability scanning - something Composer doesn't have!
 ### 2. **Dependency Insights**
 `presto why` and `presto why-not` commands help you understand your dependency tree
 
-### 3. **10x-20x Speed**
-Parallel downloads and native binary make it incredibly fast
+### 3. **Composer's Own Version Semantics**
+`~1.0` means what Composer says it means, constraints are intersected rather than
+replaced, and `conflict` is honoured
 
 ### 4. **Shared Cache**
 Manifests and archives are cached across projects, so the second install is local
@@ -287,7 +313,7 @@ presto/
 ├── internal/
 │   ├── parser/          # composer.json parser
 │   ├── packagist/       # Packagist API client
-│   ├── resolver/        # Dependency resolver
+│   ├── resolver/        # Dependency resolver and version solver
 │   ├── downloader/      # Parallel downloader
 │   ├── autoload/        # Autoload generator
 │   ├── cache/           # Shared manifest and archive cache

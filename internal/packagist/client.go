@@ -7,13 +7,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/aras/presto/internal/cache"
 	"github.com/aras/presto/internal/httpx"
+	version "github.com/shyim/go-version"
 )
 
 const (
@@ -60,6 +61,7 @@ type VersionInfo struct {
 	Authors           []Author          `json:"authors"`
 	Require           map[string]string `json:"require"`
 	RequireDev        map[string]string `json:"require-dev"`
+	Conflict          map[string]string `json:"conflict"`
 	Autoload          json.RawMessage   `json:"autoload"`
 	Time              string            `json:"time"`
 	Dist              DistInfo          `json:"dist"`
@@ -152,7 +154,7 @@ func (c *Client) GetPackage(name string) (*PackageInfo, error) {
 		return nil, err
 	}
 
-	info.LatestVersion = c.findLatestStable(info.Versions)
+	info.LatestVersion = findLatestStable(info.Versions)
 
 	c.mu.Lock()
 	c.cache[name] = info
@@ -298,6 +300,7 @@ func parseManifest(name string, body []byte) (*PackageInfo, error) {
 			Authors         []Author        `json:"authors"`
 			Require         json.RawMessage `json:"require"`
 			RequireDev      json.RawMessage `json:"require-dev"`
+			Conflict        json.RawMessage `json:"conflict"`
 			Autoload        json.RawMessage `json:"autoload"`
 			Time            string          `json:"time"`
 			Dist            DistInfo        `json:"dist"`
@@ -330,6 +333,11 @@ func parseManifest(name string, body []byte) (*PackageInfo, error) {
 			_ = json.Unmarshal(v.Require, &require)
 		}
 
+		var conflict map[string]string
+		if len(v.Conflict) > 0 && string(v.Conflict) != "null" {
+			_ = json.Unmarshal(v.Conflict, &conflict)
+		}
+
 		versionMap[v.Version] = &VersionInfo{
 			Name:            name,
 			Version:         v.Version,
@@ -341,6 +349,7 @@ func parseManifest(name string, body []byte) (*PackageInfo, error) {
 			Authors:         v.Authors,
 			Require:         require,
 			RequireDev:      requireDev,
+			Conflict:        conflict,
 			Autoload:        v.Autoload,
 			Time:            v.Time,
 			Dist:            v.Dist,
@@ -360,70 +369,47 @@ func parseManifest(name string, body []byte) (*PackageInfo, error) {
 	}, nil
 }
 
-// normalizeFourPartVersion truncates a four-part Composer version (e.g. 9.18.1.10)
-// to three parts so it can be parsed by the semver library. The fourth segment is
-// a Composer-specific build qualifier with no semver equivalent.
-func normalizeFourPartVersion(version string) string {
-	version = strings.TrimPrefix(version, "v")
-	if parts := strings.SplitN(version, ".", 5); len(parts) == 4 {
-		if !strings.ContainsAny(parts[3], "-+") {
-			return strings.Join(parts[:3], ".")
-		}
+// findLatestStable picks the newest release, falling back to the newest
+// prerelease when a package has never had a stable one.
+func findLatestStable(versions map[string]*VersionInfo) string {
+	names := make([]string, 0, len(versions))
+	for name := range versions {
+		names = append(names, name)
 	}
-	return version
-}
 
-// findLatestStable finds the latest stable version
-func (c *Client) findLatestStable(versions map[string]*VersionInfo) string {
-	var latest string
-	var latestVer *semver.Version
+	sort.Strings(names)
 
-	for vStr := range versions {
-		// Skip dev versions
-		if strings.Contains(vStr, "dev") {
-			continue
-		}
+	var (
+		stable    *version.Version
+		stableRaw string
+		any       *version.Version
+		anyRaw    string
+	)
 
-		// Parse version (normalise four-part versions like 9.18.1.10 first)
-		v, err := semver.NewVersion(normalizeFourPartVersion(vStr))
+	for _, candidate := range names {
+		parsed, err := version.NewVersion(candidate)
 		if err != nil {
-			// If not a valid semver, try a simple comparison as fallback
-			if latest == "" || vStr > latest {
-				// Only if it doesn't look like a pre-release
-				if !strings.Contains(vStr, "alpha") &&
-					!strings.Contains(vStr, "beta") &&
-					!strings.Contains(vStr, "RC") {
-					latest = vStr
-				}
-			}
 			continue
 		}
 
-		// Skip pre-releases for "latest stable"
-		if v.Prerelease() != "" {
+		if any == nil || parsed.GreaterThan(any) {
+			any, anyRaw = parsed, candidate
+		}
+
+		if version.Stability(candidate) != "stable" {
 			continue
 		}
 
-		if latestVer == nil || v.GreaterThan(latestVer) {
-			latestVer = v
-			latest = vStr
+		if stable == nil || parsed.GreaterThan(stable) {
+			stable, stableRaw = parsed, candidate
 		}
 	}
 
-	// If no stable found, return any version (prefer non-dev)
-	if latest == "" {
-		for vStr := range versions {
-			if !strings.Contains(vStr, "dev") {
-				return vStr
-			}
-		}
-		// Final fallback: just return any
-		for vStr := range versions {
-			return vStr
-		}
+	if stableRaw != "" {
+		return stableRaw
 	}
 
-	return latest
+	return anyRaw
 }
 
 // GetVersion fetches a specific version of a package
