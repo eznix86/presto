@@ -148,3 +148,23 @@ func mustPath(t *testing.T, name string) string {
 
 	return path
 }
+
+func TestRequireAsksForARangeNotAnExactVersion(t *testing.T) {
+	cases := map[string]string{
+		"v8.1.0":      "^8.1",
+		"3.0.2":       "^3.0",
+		"v10.50.3":    "^10.50",
+		"v9.18.1.10":  "^9.18",
+		"0.20.0":      "^0.20.0",
+		"0.12.3":      "^0.12.3",
+		"1.0.0-beta1": "1.0.0-beta1",
+	}
+
+	for release, want := range cases {
+		t.Run(release, func(t *testing.T) {
+			if got := RecommendedConstraint(release); got != want {
+				t.Errorf("RecommendedConstraint(%q) = %q, want %q", release, got, want)
+			}
+		})
+	}
+}

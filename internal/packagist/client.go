@@ -412,6 +412,27 @@ func findLatestStable(versions map[string]*VersionInfo) string {
 	return anyRaw
 }
 
+// RecommendedConstraint turns a release into the constraint Composer writes into
+// composer.json: ^major.minor, or ^0.minor.patch below 1.0 where a minor bump is
+// already a breaking change. An exact version belongs in composer.lock, not here,
+// or nothing can ever be updated.
+func RecommendedConstraint(release string) string {
+	if version.Stability(release) != "stable" {
+		return release
+	}
+
+	parsed, err := version.NewVersion(release)
+	if err != nil {
+		return release
+	}
+
+	if parsed.Major() == 0 {
+		return fmt.Sprintf("^0.%d.%d", parsed.Minor(), parsed.Patch())
+	}
+
+	return fmt.Sprintf("^%d.%d", parsed.Major(), parsed.Minor())
+}
+
 // GetVersion fetches a specific version of a package
 func (c *Client) GetVersion(name, version string) (*VersionInfo, error) {
 	info, err := c.GetPackage(name)

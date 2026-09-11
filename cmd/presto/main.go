@@ -457,9 +457,11 @@ func runRequire(packages []string) error {
 		if composer.Require == nil {
 			composer.Require = make(map[string]string)
 		}
-		composer.Require[pkg] = info.LatestVersion
 
-		ui.Added(pkg, info.LatestVersion)
+		constraint := packagist.RecommendedConstraint(info.LatestVersion)
+		composer.Require[pkg] = constraint
+
+		ui.Added(pkg, constraint)
 	}
 
 	if err := parser.WriteComposerJSON("composer.json", composer); err != nil {
