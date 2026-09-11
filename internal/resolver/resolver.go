@@ -54,6 +54,8 @@ func (r *Resolver) logf(format string, args ...interface{}) {
 func (r *Resolver) Resolve(composer *parser.ComposerJSON) ([]*Package, error) {
 	var packages []*Package
 
+	r.prefetch(composer)
+
 	for name, constraint := range composer.Require {
 		if r.isPlatformPackage(name) {
 			continue

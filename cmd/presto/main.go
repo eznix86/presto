@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aras/presto/internal/autoload"
+	"github.com/aras/presto/internal/cache"
 	"github.com/aras/presto/internal/downloader"
 	"github.com/aras/presto/internal/lockfile"
 	"github.com/aras/presto/internal/packagist"
@@ -639,13 +640,12 @@ func runInit() error {
 }
 
 func runCacheClear() error {
-	cacheDir := ".presto/cache"
-
-	if err := os.RemoveAll(cacheDir); err != nil {
+	dir, err := cache.Clear()
+	if err != nil {
 		return fmt.Errorf("failed to clear cache: %w", err)
 	}
 
-	ui.Status("Cleared %s", cacheDir)
+	ui.Status("Cleared %s", dir)
 
 	return nil
 }

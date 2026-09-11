@@ -139,18 +139,22 @@ presto cache clear
 
 ## ⚡ Performance Comparison
 
-Real-world benchmark (Laravel-sized project with 47 packages):
+A Laravel 10 project, 95 packages, same machine, `vendor/` and the lock file
+deleted before each run. Both tools keep a warm package cache.
 
-| Tool     | Time    | Speed  |
-|----------|---------|--------|
-| Composer | 42.3s   | 1x     |
-| **Presto** | **3.8s** | **11x** |
+| Tool | Time |
+|------|------|
+| Composer 2.10 | 4.62s |
+| **Presto** | **1.27s** |
 
-**Second run (with cache):**
-| Tool     | Time    | Speed  |
-|----------|---------|--------|
-| Composer | 8.2s    | 1x     |
-| **Presto** | **0.4s** | **20x** |
+With a cold cache, so every manifest and archive is fetched: **12.6s**.
+
+The install is three phases and each one is parallel:
+
+- manifests are fetched breadth-first across 16 connections, not one at a time
+- manifests are cached on disk and revalidated with `ETag`, so a repeat install
+  sends no bytes
+- archives are cached too, so wiping `vendor/` costs no network at all
 
 ## 🎨 Example Output
 
@@ -238,6 +242,20 @@ warning: 1 script was not run: this project is not trusted
 
 `presto run <script>` is never gated. You typed the name, so you meant it.
 
+## 💾 Cache
+
+Presto caches package manifests and archives in `~/.cache/presto`, shared across
+every project.
+
+```bash
+presto cache clear   # remove it
+```
+
+Set `PRESTO_CACHE_DIR` to move it, or `XDG_CACHE_HOME` to move it with everything
+else. A manifest is reused for 15 minutes without asking packagist, then
+revalidated with its `ETag`, which usually comes back as a `304` and no body. If
+packagist cannot be reached at all, a cached manifest still answers.
+
 ## 🔥 Killer Features
 
 ### 1. **Security Audit**
@@ -249,8 +267,8 @@ Built-in vulnerability scanning - something Composer doesn't have!
 ### 3. **10x-20x Speed**
 Parallel downloads and native binary make it incredibly fast
 
-### 4. **Smart Caching**
-Shared cache across projects saves disk space and time
+### 4. **Shared Cache**
+Manifests and archives are cached across projects, so the second install is local
 
 ### 5. **Script Trust**
 A project's scripts run only once you have seen them and said yes
@@ -266,6 +284,8 @@ presto/
 │   ├── resolver/        # Dependency resolver
 │   ├── downloader/      # Parallel downloader
 │   ├── autoload/        # Autoload generator
+│   ├── cache/           # Shared manifest and archive cache
+│   ├── httpx/           # Tuned HTTP client
 │   ├── lockfile/        # composer.lock writer
 │   ├── scripts/         # Composer script runner
 │   ├── security/        # Security auditor

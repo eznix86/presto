@@ -195,12 +195,15 @@ Development
 
 ## Performance Comparison
 
-**Laravel-sized project (47 packages):**
+**Laravel 10 project (95 packages), same machine, `vendor/` deleted before each run:**
 
-| Command | Composer | Presto | Speedup |
-|---------|----------|--------|---------|
-| First install | 42.3s | 3.8s | **11x faster** |
-| Cached install | 8.2s | 0.4s | **20x faster** |
+| Run | Composer 2.10 | Presto |
+|-----|---------------|--------|
+| Warm cache | 4.62s | **1.27s** |
+| Cold cache | | 12.6s |
+
+Presto caches manifests and archives in `~/.cache/presto`, shared across projects.
+Run `presto cache clear` to drop it.
 
 ## Common Workflows
 

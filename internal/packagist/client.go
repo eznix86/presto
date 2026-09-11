@@ -5,22 +5,36 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/aras/presto/internal/cache"
+	"github.com/aras/presto/internal/httpx"
 )
 
 const (
 	PackagistAPIURL = "https://repo.packagist.org"
-	CacheDir        = ".presto/cache"
+
+	// MaxConnections caps the parallel manifest fetches. Packagist serves the p2
+	// endpoints from a CDN and asks for no more.
+	MaxConnections = 16
+
+	// manifestTTL mirrors the "cache-control: max-age=900" packagist sends on the
+	// p2 endpoints. Inside that window a cached manifest is used without asking.
+	manifestTTL = 15 * time.Minute
 )
 
 // Client handles communication with Packagist API
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
-	cache      map[string]*PackageInfo
+
+	mu    sync.RWMutex
+	cache map[string]*PackageInfo
 }
 
 // PackageInfo represents package metadata from Packagist
@@ -109,45 +123,170 @@ type PackageMetadata struct {
 // NewClient creates a new Packagist client
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		baseURL: PackagistAPIURL,
-		cache:   make(map[string]*PackageInfo),
+		httpClient: httpx.New(30*time.Second, MaxConnections),
+		baseURL:    PackagistAPIURL,
+		cache:      make(map[string]*PackageInfo),
 	}
 }
 
-// GetPackage fetches package information from Packagist
+// GetPackage fetches package information from Packagist. It is safe to call
+// from several goroutines.
 func (c *Client) GetPackage(name string) (*PackageInfo, error) {
-	// Check cache
-	if cached, ok := c.cache[name]; ok {
+	name = strings.ToLower(strings.TrimSpace(name))
+
+	c.mu.RLock()
+	cached, ok := c.cache[name]
+	c.mu.RUnlock()
+
+	if ok {
 		return cached, nil
 	}
 
-	// Normalize package name
-	name = strings.ToLower(strings.TrimSpace(name))
-
-	// Use the p2 API endpoint (metadata v2)
-	url := fmt.Sprintf("%s/p2/%s.json", c.baseURL, name)
-
-	// Make request
-	resp, err := c.httpClient.Get(url)
+	body, err := c.manifest(name)
 	if err != nil {
+		return nil, err
+	}
+
+	info, err := parseManifest(name, body)
+	if err != nil {
+		return nil, err
+	}
+
+	info.LatestVersion = c.findLatestStable(info.Versions)
+
+	c.mu.Lock()
+	c.cache[name] = info
+	c.mu.Unlock()
+
+	return info, nil
+}
+
+// manifest returns the raw p2 document, from disk when it is still fresh, from
+// the network otherwise. A cached copy also answers when the network is down.
+func (c *Client) manifest(name string) ([]byte, error) {
+	path, err := cache.Metadata(name)
+	if err != nil {
+		path = ""
+	}
+
+	var (
+		body []byte
+		etag string
+	)
+
+	if path != "" {
+		body, etag = readCachedManifest(path)
+
+		if body != nil && cachedManifestIsFresh(path) {
+			return body, nil
+		}
+	}
+
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/p2/%s.json", c.baseURL, name), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if body != nil {
+			return body, nil
+		}
+
 		return nil, fmt.Errorf("failed to fetch package: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		now := time.Now()
+		_ = os.Chtimes(path, now, now)
+
+		return body, nil
+
+	case http.StatusOK:
+		fetched, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if path != "" {
+			writeCachedManifest(path, fetched, resp.Header.Get("ETag"))
+		}
+
+		return fetched, nil
+
+	default:
+		if body != nil {
+			return body, nil
+		}
+
 		return nil, fmt.Errorf("package not found: %s (status: %d)", name, resp.StatusCode)
 	}
+}
 
-	// Read response
-	body, err := io.ReadAll(resp.Body)
+func cachedManifestIsFresh(path string) bool {
+	info, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return false
 	}
 
-	// Parse response - Packagist v2 format has "packages" with package name as key
+	return time.Since(info.ModTime()) < manifestTTL
+}
+
+func readCachedManifest(path string) ([]byte, string) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, ""
+	}
+
+	etag, err := os.ReadFile(path + ".etag")
+	if err != nil {
+		return body, ""
+	}
+
+	return body, strings.TrimSpace(string(etag))
+}
+
+func writeCachedManifest(path string, body []byte, etag string) {
+	if err := writeAtomic(path, body); err != nil {
+		return
+	}
+
+	if etag == "" {
+		_ = os.Remove(path + ".etag")
+		return
+	}
+
+	_ = writeAtomic(path+".etag", []byte(etag))
+}
+
+func writeAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = os.Remove(tmp.Name()) }()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tmp.Name(), path)
+}
+
+func parseManifest(name string, body []byte) (*PackageInfo, error) {
 	var apiResp struct {
 		Packages map[string][]struct {
 			Version         string          `json:"version"`
@@ -157,9 +296,9 @@ func (c *Client) GetPackage(name string) (*PackageInfo, error) {
 			Homepage        string          `json:"homepage"`
 			License         []string        `json:"license"`
 			Authors         []Author        `json:"authors"`
-			Require         json.RawMessage `json:"require"`     // Can be null, [], {}, or map
-			RequireDev      json.RawMessage `json:"require-dev"` // Can be null, [], {}, or map
-			Autoload        json.RawMessage `json:"autoload"`    // Use RawMessage for debugging
+			Require         json.RawMessage `json:"require"`
+			RequireDev      json.RawMessage `json:"require-dev"`
+			Autoload        json.RawMessage `json:"autoload"`
 			Time            string          `json:"time"`
 			Dist            DistInfo        `json:"dist"`
 			Source          SourceInfo      `json:"source"`
@@ -171,29 +310,23 @@ func (c *Client) GetPackage(name string) (*PackageInfo, error) {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	// Get versions for this package
 	versions, ok := apiResp.Packages[name]
 	if !ok || len(versions) == 0 {
 		return nil, fmt.Errorf("no versions found for package: %s", name)
 	}
 
-	// Convert to our format
-	versionMap := make(map[string]*VersionInfo)
+	versionMap := make(map[string]*VersionInfo, len(versions))
+
 	var description string
 
 	for _, v := range versions {
-		// Parse require-dev flexibly
 		var requireDev map[string]string
 		if len(v.RequireDev) > 0 && string(v.RequireDev) != "null" {
-			// Try to unmarshal as map, ignore errors if it's an array (empty requirements)
 			_ = json.Unmarshal(v.RequireDev, &requireDev)
 		}
 
-		// Parse require flexibly
 		var require map[string]string
 		if len(v.Require) > 0 && string(v.Require) != "null" {
-
-			// Try to unmarshal as map, ignore errors if it's an array (empty requirements)
 			_ = json.Unmarshal(v.Require, &require)
 		}
 
@@ -220,19 +353,11 @@ func (c *Client) GetPackage(name string) (*PackageInfo, error) {
 		}
 	}
 
-	info := &PackageInfo{
+	return &PackageInfo{
 		Name:        name,
 		Description: description,
 		Versions:    versionMap,
-	}
-
-	// Find latest stable version
-	info.LatestVersion = c.findLatestStable(versionMap)
-
-	// Cache the result
-	c.cache[name] = info
-
-	return info, nil
+	}, nil
 }
 
 // normalizeFourPartVersion truncates a four-part Composer version (e.g. 9.18.1.10)

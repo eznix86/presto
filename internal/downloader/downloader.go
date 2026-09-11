@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aras/presto/internal/cache"
+	"github.com/aras/presto/internal/httpx"
 	"github.com/aras/presto/internal/resolver"
 )
 
@@ -25,11 +27,9 @@ type Downloader struct {
 // NewDownloader creates a new downloader with specified number of workers
 func NewDownloader(workers int) *Downloader {
 	return &Downloader{
-		workers: workers,
-		httpClient: &http.Client{
-			Timeout: 5 * time.Minute,
-		},
-		vendorDir: "vendor",
+		workers:    workers,
+		httpClient: httpx.New(5*time.Minute, workers),
+		vendorDir:  "vendor",
 	}
 }
 
@@ -103,42 +103,74 @@ func (d *Downloader) DownloadAll(packages []*resolver.Package, progress Progress
 	return installed, nil
 }
 
-// downloadPackage reports whether it had to fetch the package.
+// downloadPackage reports whether it had to install the package. The archive is
+// kept in the shared cache, so wiping vendor/ costs no network the second time.
 func (d *Downloader) downloadPackage(pkg *resolver.Package) (bool, error) {
 	packageDir := filepath.Join(d.vendorDir, pkg.Name)
 	if _, err := os.Stat(packageDir); err == nil {
 		return false, nil
 	}
 
-	resp, err := d.httpClient.Get(pkg.URL)
+	archive, err := cache.Archive(pkg.Name, pkg.Version, pkg.URL)
 	if err != nil {
-		return false, fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("HTTP status %d", resp.StatusCode)
+		return false, fmt.Errorf("failed to open the package cache: %w", err)
 	}
 
-	tmpFile, err := os.CreateTemp("", "presto-*.zip")
-	if err != nil {
-		return false, fmt.Errorf("failed to create temp file: %w", err)
+	reused := true
+
+	if _, err := os.Stat(archive); err != nil {
+		reused = false
+
+		if err := d.fetch(pkg.URL, archive); err != nil {
+			return false, err
+		}
 	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
 
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
-		return false, fmt.Errorf("download failed: %w", err)
-	}
+	if err := d.extractZip(archive, packageDir); err != nil {
+		_ = os.Remove(archive)
+		_ = os.RemoveAll(packageDir)
 
-	// Close file to ensure everything is flushed to disk before extraction
-	tmpFile.Close()
+		if !reused {
+			return false, fmt.Errorf("extraction failed: %w", err)
+		}
 
-	if err := d.extractZip(tmpFile.Name(), packageDir); err != nil {
-		return false, fmt.Errorf("extraction failed: %w", err)
+		return d.downloadPackage(pkg)
 	}
 
 	return true, nil
+}
+
+// fetch downloads into a sibling temp file and renames, so a killed download
+// never leaves a half-written archive in the cache.
+func (d *Downloader) fetch(url, dest string) error {
+	resp, err := d.httpClient.Get(url)
+	if err != nil {
+		return fmt.Errorf("HTTP request failed: %w", err)
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP status %d", resp.StatusCode)
+	}
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(dest), filepath.Base(dest)+".*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("download failed: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpFile.Name(), dest)
 }
 
 // extractZip extracts a zip archive to the destination directory
